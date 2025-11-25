@@ -1,8 +1,13 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestIsRuleAtBottom(t *testing.T) {
@@ -94,4 +99,60 @@ func TestRemoveRule(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUpdateUserRules_ContentTypeHeader(t *testing.T) {
+	var receivedContentType string
+	var receivedBody []byte
+
+	// Create a test server that captures the Content-Type header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedContentType = r.Header.Get("Content-Type")
+		receivedBody, _ = io.ReadAll(r.Body)
+
+		if r.URL.Path == "/control/filtering/set_rules" {
+			if receivedContentType != "application/json" {
+				w.WriteHeader(415)
+				w.Write([]byte("only content-type application/json is allowed"))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	config := Config{
+		AdGuardURL:    server.URL,
+		AdGuardUser:   "testuser",
+		AdGuardPass:   "testpass",
+		TargetRule:    "testrule",
+		CheckInterval: 60 * time.Second,
+		HealthPort:    "8080",
+	}
+
+	rules := []string{"rule1", "rule2", "rule3"}
+	err := updateUserRules(config, rules)
+
+	if err != nil {
+		t.Errorf("updateUserRules() returned error: %v", err)
+	}
+
+	if receivedContentType != "application/json" {
+		t.Errorf("Content-Type header = '%s', want 'application/json'", receivedContentType)
+	}
+
+	// Verify the body is valid JSON with the expected structure
+	var payload struct {
+		Rules []string `json:"rules"`
+	}
+	if err := json.Unmarshal(receivedBody, &payload); err != nil {
+		t.Errorf("Failed to unmarshal request body: %v", err)
+	}
+
+	if !reflect.DeepEqual(payload.Rules, rules) {
+		t.Errorf("Request body rules = %v, want %v", payload.Rules, rules)
+	}
+
+	t.Logf("✓ Content-Type header correctly set to: %s", receivedContentType)
+	t.Logf("✓ Request body: %s", string(receivedBody))
 }
