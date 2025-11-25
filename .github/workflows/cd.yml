@@ -17,51 +17,16 @@ on:
         type: boolean
         default: true
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
-
+# CD uses the shared build workflow with push enabled
+# This ensures CI and CD use identical build processes
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    name: Build and Push
+    uses: ./.github/workflows/build.yml
+    with:
+      push: true
+      version: ${{ inputs.version || github.ref_name }}
+      latest: ${{ inputs.latest }}
     permissions:
       contents: read
       packages: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.version || github.ref }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to the Container registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=semver,pattern=v{{version}},value=${{ inputs.version }},enable=${{ inputs.version != '' }}
-            type=semver,pattern=v{{major}}.{{minor}},value=${{ inputs.version }},enable=${{ inputs.version != '' }}
-            type=semver,pattern=v{{major}},value=${{ inputs.version }},enable=${{ inputs.version != '' }}
-            type=ref,event=tag
-            type=raw,value=latest,enable=${{ inputs.latest == '' && 'true' || inputs.latest }}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ hashFiles('*.go', 'go.mod') }}
-          cache-to: type=gha,mode=max,scope=${{ hashFiles('*.go', 'go.mod') }}

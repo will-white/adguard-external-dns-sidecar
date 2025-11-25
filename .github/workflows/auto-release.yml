@@ -10,16 +10,34 @@ on:
         required: false
         type: boolean
         default: true
+      dry_run:
+        description: 'Dry run (check for changes without tagging)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
   packages: write
 
 jobs:
+  # First, validate the code passes CI before considering a release
+  validate:
+    name: Validate Build
+    uses: ./.github/workflows/build.yml
+    with:
+      push: false
+    permissions:
+      contents: read
+      packages: read
+
   check-and-tag:
+    name: Check for Changes
     runs-on: ubuntu-latest
+    needs: validate
     outputs:
       new_tag: ${{ steps.tag_version.outputs.new_tag }}
+      changelog: ${{ steps.tag_version.outputs.changelog }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -31,14 +49,35 @@ jobs:
         uses: mathieudutour/github-tag-action@v6.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          default_bump: patch # Default to patch bump if no specific trigger found
+          default_bump: patch
           default_prerelease_bump: false
+          dry_run: ${{ inputs.dry_run || false }}
 
-  call-cd:
+      - name: Report changes detected
+        if: steps.tag_version.outputs.new_tag != ''
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**New Tag:** ${{ steps.tag_version.outputs.new_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Previous Tag:** ${{ steps.tag_version.outputs.previous_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Changelog" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.tag_version.outputs.changelog }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: No changes detected
+        if: steps.tag_version.outputs.new_tag == ''
+        run: |
+          echo "## No Release Needed" >> $GITHUB_STEP_SUMMARY
+          echo "No new commits since the last tag." >> $GITHUB_STEP_SUMMARY
+
+  release:
+    name: Build and Push Release
     needs: check-and-tag
-    if: needs.check-and-tag.outputs.new_tag != ''
-    uses: ./.github/workflows/cd.yml
+    if: needs.check-and-tag.outputs.new_tag != '' && !inputs.dry_run
+    uses: ./.github/workflows/build.yml
     with:
+      push: true
       version: ${{ needs.check-and-tag.outputs.new_tag }}
       latest: ${{ github.event_name == 'schedule' || inputs.latest }}
-    secrets: inherit
+    permissions:
+      contents: read
+      packages: write
