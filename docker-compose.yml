@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  adguard-sidecar:
+    build: .
+    image: adguard-external-dns-sidecar:latest
+    container_name: adguard-sidecar
+    restart: unless-stopped
+    environment:
+      # Required: AdGuard Home URL (without trailing slash)
+      ADGUARD_URL: "http://adguard:3000"
+      
+      # Required: AdGuard Home credentials
+      ADGUARD_USER: "admin"
+      ADGUARD_PASS: "your-password-here"
+      
+      # Required: The rule that must always be at the bottom
+      TARGET_RULE: "||*.domain.tld^$dnsrewrite=NOERROR;A;192.168.1.100"
+      
+      # Optional: Check interval in seconds (default: 60)
+      CHECK_INTERVAL: "60"
+    
+    # If running alongside external-dns in Kubernetes, you can use:
+    # network_mode: "service:external-dns"
+    # Otherwise, ensure it can reach AdGuard Home:
+    networks:
+      - adguard-network
+
+networks:
+  adguard-network:
+    external: true
+    # Or create a new network:
+    # driver: bridge

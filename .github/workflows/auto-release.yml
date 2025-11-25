@@ -1,0 +1,46 @@
+name: Auto Release
+
+on:
+  schedule:
+    - cron: '0 * * * *' # Run every hour
+  workflow_dispatch:
+
+jobs:
+  check-and-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to push tags
+    outputs:
+      new_version: ${{ steps.semver.outputs.version_tag }}
+      changed: ${{ steps.semver.outputs.changed }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate next version
+        id: semver
+        uses: paulhatch/semantic-version@v5.4.0
+        with:
+          tag_prefix: "v"
+          major_pattern: "(MAJOR)"
+          minor_pattern: "(feat)"
+          version_format: "${major}.${minor}.${patch}"
+          # If no changes are detected, changed will be false
+
+      - name: Push Tag
+        if: steps.semver.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ steps.semver.outputs.version_tag }}
+          git push origin ${{ steps.semver.outputs.version_tag }}
+
+  call-cd:
+    needs: check-and-tag
+    if: needs.check-and-tag.outputs.changed == 'true'
+    uses: ./.github/workflows/cd.yml
+    with:
+      version: ${{ needs.check-and-tag.outputs.new_version }}
+    secrets: inherit

@@ -1,0 +1,25 @@
+{
+	"name": "AdGuard External-DNS Sidecar",
+	"image": "mcr.microsoft.com/devcontainers/go:1-1.21-bookworm",
+	
+	"features": {
+		"ghcr.io/devcontainers/features/docker-in-docker:2": {}
+	},
+
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"golang.go"
+			],
+			"settings": {
+				"go.toolsManagement.checkForUpdates": "local",
+				"go.useLanguageServer": true,
+				"go.gopath": "/go"
+			}
+		}
+	},
+
+	"postCreateCommand": "go mod download",
+
+	"remoteUser": "vscode"
+}
