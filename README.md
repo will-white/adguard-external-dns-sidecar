@@ -38,6 +38,7 @@ All configuration is done via environment variables:
 | `ADGUARD_PASS` | ✅ Yes | - | AdGuard Home admin password |
 | `TARGET_RULE` | ✅ Yes | - | The exact rule that must stay at the bottom (e.g., `\|\|*.domain.tld^$dnsrewrite=NOERROR;A;192.168.1.100`) |
 | `CHECK_INTERVAL` | ❌ No | `60` | How often to check (in seconds) |
+| `HEALTH_PORT` | ❌ No | `8080` | Port for health check endpoints (`/healthz` and `/readyz`) |
 
 ### Important Notes
 

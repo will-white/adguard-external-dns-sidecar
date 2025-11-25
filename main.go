@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -13,24 +14,56 @@ import (
 	"time"
 )
 
+// Health check client mode flag
+var healthCheck = flag.Bool("health", false, "Run health check client and exit")
+
 type Config struct {
 	AdGuardURL    string
 	AdGuardUser   string
 	AdGuardPass   string
 	TargetRule    string
 	CheckInterval time.Duration
+	HealthPort    string
 }
 
 type FilteringStatus struct {
 	UserRules []string `json:"user_rules"`
 }
 
+// Health status for the health check endpoint
+var (
+	healthy     = true
+	lastCheckOK = true
+)
+
 func main() {
+	flag.Parse()
+
+	// Health check client mode for Docker HEALTHCHECK
+	if *healthCheck {
+		port := os.Getenv("HEALTH_PORT")
+		if port == "" {
+			port = "8080"
+		}
+		resp, err := http.Get("http://localhost:" + port + "/healthz")
+		if err != nil {
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	log.Println("Starting AdGuard External-DNS Sidecar...")
 
 	config := loadConfig()
 	log.Printf("Configuration loaded: URL=%s, Target Rule=%s, Check Interval=%v",
 		config.AdGuardURL, config.TargetRule, config.CheckInterval)
+
+	// Start health check server
+	go startHealthServer(config.HealthPort)
 
 	// Run the main loop
 	ticker := time.NewTicker(config.CheckInterval)
@@ -39,13 +72,42 @@ func main() {
 	// Run immediately on startup
 	if err := enforceRulePosition(config); err != nil {
 		log.Printf("Error on initial check: %v", err)
+		lastCheckOK = false
+	} else {
+		lastCheckOK = true
 	}
 
 	// Then run on interval
 	for range ticker.C {
 		if err := enforceRulePosition(config); err != nil {
 			log.Printf("Error enforcing rule position: %v", err)
+			lastCheckOK = false
+		} else {
+			lastCheckOK = true
 		}
+	}
+}
+
+func startHealthServer(port string) {
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if healthy && lastCheckOK {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("OK"))
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("UNHEALTHY"))
+		}
+	})
+
+	http.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("READY"))
+	})
+
+	log.Printf("Health server listening on port %s", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Printf("Health server error: %v", err)
+		healthy = false
 	}
 }
 
@@ -70,6 +132,12 @@ func loadConfig() Config {
 			log.Fatal("CHECK_INTERVAL must be greater than 0")
 		}
 		config.CheckInterval = time.Duration(seconds) * time.Second
+	}
+
+	// Parse HEALTH_PORT with default
+	config.HealthPort = os.Getenv("HEALTH_PORT")
+	if config.HealthPort == "" {
+		config.HealthPort = "8080"
 	}
 
 	// Ensure URL doesn't end with slash
