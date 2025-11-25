@@ -25,7 +25,7 @@ jobs:
         uses: mathieudutour/github-tag-action@v6.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          default_bump: false # Only release on fix/feat/breaking changes
+          default_bump: patch # Default to patch bump if no specific trigger found
           default_prerelease_bump: false
 
   call-cd:
