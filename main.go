@@ -235,16 +235,25 @@ func fetchUserRules(config Config) ([]string, error) {
 func updateUserRules(config Config, rules []string) error {
 	url := fmt.Sprintf("%s/control/filtering/set_rules", config.AdGuardURL)
 
-	// The API expects the rules as a plain text body, one rule per line
-	rulesText := strings.Join(rules, "\n")
+	// The API expects JSON with the rules array
+	payload := struct {
+		Rules []string `json:"rules"`
+	}{
+		Rules: rules,
+	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBufferString(rulesText))
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal rules: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return err
 	}
 
 	req.SetBasicAuth(config.AdGuardUser, config.AdGuardPass)
-	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
