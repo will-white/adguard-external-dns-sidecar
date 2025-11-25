@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '0 * * * *' # Run every hour
   workflow_dispatch:
+    inputs:
+      latest:
+        description: 'Tag as latest'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -34,4 +40,5 @@ jobs:
     uses: ./.github/workflows/cd.yml
     with:
       version: ${{ needs.check-and-tag.outputs.new_tag }}
+      latest: ${{ github.event_name == 'schedule' || inputs.latest }}
     secrets: inherit
