@@ -54,7 +54,7 @@ jobs:
             type=semver,pattern=v{{major}}.{{minor}},value=${{ inputs.version }},enable=${{ inputs.version != '' }}
             type=semver,pattern=v{{major}},value=${{ inputs.version }},enable=${{ inputs.version != '' }}
             type=ref,event=tag
-            type=raw,value=latest,enable=${{ inputs.latest }}
+            type=raw,value=latest,enable=${{ inputs.latest == '' && 'true' || inputs.latest }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
