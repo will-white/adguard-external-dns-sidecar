@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -21,7 +22,8 @@ type Config struct {
 	AdGuardURL    string
 	AdGuardUser   string
 	AdGuardPass   string
-	TargetRule    string
+	RootDomain    string
+	FallbackIP    string
 	CheckInterval time.Duration
 	HealthPort    string
 }
@@ -59,18 +61,24 @@ func main() {
 	log.Println("Starting AdGuard External-DNS Sidecar...")
 
 	config := loadConfig()
-	log.Printf("Configuration loaded: URL=%s, Target Rule=%s, Check Interval=%v",
-		config.AdGuardURL, config.TargetRule, config.CheckInterval)
+	log.Printf("Configuration loaded: URL=%s, Root=%s, IP=%s, Check Interval=%v",
+		config.AdGuardURL, config.RootDomain, config.FallbackIP, config.CheckInterval)
 
 	// Start health check server
 	go startHealthServer(config.HealthPort)
+
+	// Initialize K8s Client
+	k8sClient, err := NewK8sClient() // Defined in k8s.go
+	if err != nil {
+		log.Fatalf("Failed to create K8s client: %v", err)
+	}
 
 	// Run the main loop
 	ticker := time.NewTicker(config.CheckInterval)
 	defer ticker.Stop()
 
 	// Run immediately on startup
-	if err := enforceRulePosition(config); err != nil {
+	if err := syncRules(config, k8sClient); err != nil {
 		log.Printf("Error on initial check: %v", err)
 		lastCheckOK = false
 	} else {
@@ -79,8 +87,8 @@ func main() {
 
 	// Then run on interval
 	for range ticker.C {
-		if err := enforceRulePosition(config); err != nil {
-			log.Printf("Error enforcing rule position: %v", err)
+		if err := syncRules(config, k8sClient); err != nil {
+			log.Printf("Error syncing rules: %v", err)
 			lastCheckOK = false
 		} else {
 			lastCheckOK = true
@@ -116,7 +124,8 @@ func loadConfig() Config {
 		AdGuardURL:  getEnvOrFatal("ADGUARD_URL"),
 		AdGuardUser: getEnvOrFatal("ADGUARD_USER"),
 		AdGuardPass: getEnvOrFatal("ADGUARD_PASS"),
-		TargetRule:  getEnvOrFatal("TARGET_RULE"),
+		RootDomain:  getEnvOrFatal("ROOT_DOMAIN"),
+		FallbackIP:  getEnvOrFatal("FALLBACK_IP"),
 	}
 
 	// Parse CHECK_INTERVAL with default
@@ -143,6 +152,9 @@ func loadConfig() Config {
 	// Ensure URL doesn't end with slash
 	config.AdGuardURL = strings.TrimSuffix(config.AdGuardURL, "/")
 
+	// Normalize root domain (remove leading dot)
+	config.RootDomain = strings.TrimPrefix(config.RootDomain, ".")
+
 	return config
 }
 
@@ -154,26 +166,30 @@ func getEnvOrFatal(key string) string {
 	return value
 }
 
-func enforceRulePosition(config Config) error {
+// syncRules handles the core logic: Fetch hosts -> Generate Rule -> Update AdGuard
+func syncRules(config Config, k8sClient K8sClient) error {
+	hosts, err := k8sClient.GetIngressHosts()
+	if err != nil {
+		return fmt.Errorf("failed to fetch ingress hosts: %w", err)
+	}
+
+	// Generate the dynamic rule
+	newSmartRule := generateSmartRule(hosts, config.RootDomain, config.FallbackIP)
+
 	// Fetch current rules
 	rules, err := fetchUserRules(config)
 	if err != nil {
 		return fmt.Errorf("failed to fetch rules: %w", err)
 	}
 
-	log.Printf("Fetched %d user rules from AdGuard", len(rules))
+	// Process rules
+	updatedRules, needsUpdate := applySmartRule(rules, newSmartRule, config.RootDomain)
 
-	// Check if target rule is at the bottom
-	if isRuleAtBottom(rules, config.TargetRule) {
-		log.Println("Target rule is already at the bottom. No action needed.")
+	if !needsUpdate {
 		return nil
 	}
 
-	// Remove all occurrences of the target rule and append it to the end
-	updatedRules := removeRule(rules, config.TargetRule)
-	updatedRules = append(updatedRules, config.TargetRule)
-
-	log.Printf("Moving target rule to bottom position (rule %d of %d)", len(updatedRules), len(updatedRules))
+	log.Printf("Updating user rules in AdGuard (Total: %d)", len(updatedRules))
 
 	// Update rules in AdGuard
 	if err := updateUserRules(config, updatedRules); err != nil {
@@ -184,22 +200,92 @@ func enforceRulePosition(config Config) error {
 	return nil
 }
 
-func isRuleAtBottom(rules []string, targetRule string) bool {
-	if len(rules) == 0 {
-		return false
+// generateSmartRule creates the negative lookahead regex
+func generateSmartRule(hosts []string, rootDomain, ip string) string {
+	// If no hosts, default to catch-all for the domain
+	if len(hosts) == 0 {
+		return fmt.Sprintf("||*.%s^$dnsrewrite=NOERROR;A;%s", rootDomain, ip)
 	}
-	// Check if the last rule matches the target
-	return rules[len(rules)-1] == targetRule
+
+	var escapedHosts []string
+	for _, h := range hosts {
+		// We care about full FQDNs.
+		// Regex: (?!host1\.domain\.com$|host2\.domain\.com$)
+		escaped := regexp.QuoteMeta(h)
+		escapedHosts = append(escapedHosts, escaped+"$")
+	}
+
+	// Join with pipe
+	exclusionGroup := strings.Join(escapedHosts, "|")
+
+	// Final Regex
+	// /^(?!host1$|host2$).+\.willwhite\.dev$/
+	// Note: We need to escape the root domain too for the matching part
+	escapedRoot := regexp.QuoteMeta(rootDomain)
+
+	// AdGuard Regex: /regex/$options
+	return fmt.Sprintf("/^(?!%s).+\\.%s$/$dnsrewrite=NOERROR;A;%s", exclusionGroup, escapedRoot, ip)
 }
 
-func removeRule(rules []string, targetRule string) []string {
+// applySmartRule filters out old/conflicting rules and appends the new one
+func applySmartRule(currentRules []string, newRule string, rootDomain string) ([]string, bool) {
 	var result []string
-	for _, rule := range rules {
-		if rule != targetRule {
-			result = append(result, rule)
+	var changed bool
+
+	// Definitions of what to remove:
+	// 1. Old static wildcard: ||*.rootDomain^...
+	// 2. regex rules targeting rootDomain
+
+	oldWildcardStart := fmt.Sprintf("||*.%s^", rootDomain)
+
+	foundExactMatch := false
+
+	for _, r := range currentRules {
+		// If it matches existing exact rule, we skip adding it here (will append later)
+		if r == newRule {
+			foundExactMatch = true
+			continue
+		}
+
+		// Check if it is a rule we should manage (delete)
+		if strings.HasPrefix(r, oldWildcardStart) {
+			changed = true
+			continue // Drop it
+		}
+
+		// Basic check for managed regex rule for this domain
+		// This is a heuristic. We assume any regex rule matching our root domain is ours.
+		// We check for the escaped root domain because regex rules will have it escaped.
+		escapedRoot := regexp.QuoteMeta(rootDomain)
+		if strings.HasPrefix(r, "/") && strings.Contains(r, escapedRoot) && strings.Contains(r, "$dnsrewrite") {
+			changed = true
+			continue
+		}
+
+		result = append(result, r)
+	}
+
+	// Always append the new rule at the bottom
+	result = append(result, newRule)
+
+	// Determine if update is needed
+	if !foundExactMatch {
+		changed = true
+	} else {
+		// Check order and content match
+		if len(result) != len(currentRules) {
+			changed = true
+		} else {
+			for i, v := range result {
+				if v != currentRules[i] {
+					changed = true
+					break
+				}
+			}
 		}
 	}
-	return result
+
+	return result, changed
 }
 
 func fetchUserRules(config Config) ([]string, error) {

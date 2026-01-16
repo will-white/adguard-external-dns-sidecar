@@ -14,8 +14,11 @@ services:
       ADGUARD_USER: "admin"
       ADGUARD_PASS: "your-password-here"
       
-      # Required: The rule that must always be at the bottom
-      TARGET_RULE: "||*.domain.tld^$dnsrewrite=NOERROR;A;192.168.1.100"
+      # Required: The root domain to manage (e.g. willwhite.dev)
+      ROOT_DOMAIN: "domain.tld"
+      
+      # Required: The fallback IP to redirect to if host is not found in cluster
+      FALLBACK_IP: "192.168.1.100"
       
       # Optional: Check interval in seconds (default: 60)
       CHECK_INTERVAL: "60"

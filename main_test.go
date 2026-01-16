@@ -6,96 +6,128 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
 
-func TestIsRuleAtBottom(t *testing.T) {
+func TestGenerateSmartRule(t *testing.T) {
 	tests := []struct {
-		name       string
-		rules      []string
-		targetRule string
-		want       bool
+		name        string
+		hosts       []string
+		rootDomain  string
+		ip          string
+		wantPrefix  string
+		wantSuffix  string
+		wantContain string
 	}{
 		{
-			name:       "Rule at bottom",
-			rules:      []string{"rule1", "rule2", "target"},
-			targetRule: "target",
-			want:       true,
+			name:        "Single Host",
+			hosts:       []string{"hass.willwhite.dev"},
+			rootDomain:  "willwhite.dev",
+			ip:          "10.0.0.1",
+			wantPrefix:  "/^(?!hass\\.willwhite\\.dev$).",
+			wantSuffix:  "$dnsrewrite=NOERROR;A;10.0.0.1",
+			wantContain: "willwhite\\.dev",
 		},
 		{
-			name:       "Rule not at bottom",
-			rules:      []string{"rule1", "target", "rule2"},
-			targetRule: "target",
-			want:       false,
+			name:        "Multiple Hosts",
+			hosts:       []string{"hass.willwhite.dev", "plex.willwhite.dev"},
+			rootDomain:  "willwhite.dev",
+			ip:          "192.168.1.1",
+			wantPrefix:  "/^(?!hass\\.willwhite\\.dev$|plex\\.willwhite\\.dev$)",
+			wantSuffix:  "192.168.1.1",
+			wantContain: "|",
 		},
 		{
-			name:       "Rule missing",
-			rules:      []string{"rule1", "rule2"},
-			targetRule: "target",
-			want:       false,
-		},
-		{
-			name:       "Empty rules",
-			rules:      []string{},
-			targetRule: "target",
-			want:       false,
+			name:        "No Hosts",
+			hosts:       []string{},
+			rootDomain:  "willwhite.dev",
+			ip:          "10.0.0.1",
+			wantPrefix:  "||*.willwhite.dev^",
+			wantSuffix:  "10.0.0.1",
+			wantContain: "$dnsrewrite=NOERROR",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isRuleAtBottom(tt.rules, tt.targetRule); got != tt.want {
-				t.Errorf("isRuleAtBottom() = %v, want %v", got, tt.want)
+			got := generateSmartRule(tt.hosts, tt.rootDomain, tt.ip)
+			if !strings.HasPrefix(got, tt.wantPrefix) {
+				t.Errorf("generateSmartRule() prefix = %v, want prefix %v", got, tt.wantPrefix)
+			}
+			if !strings.HasSuffix(got, tt.wantSuffix) {
+				t.Errorf("generateSmartRule() suffix = %v, want suffix %v", got, tt.wantSuffix)
+			}
+			if tt.wantContain != "" && !strings.Contains(got, tt.wantContain) {
+				t.Errorf("generateSmartRule() does not contain %v", tt.wantContain)
 			}
 		})
 	}
 }
 
-func TestRemoveRule(t *testing.T) {
+func TestApplySmartRule(t *testing.T) {
+	root := "domain.tld"
+	newRule := "/^(?!host1$).+\\.domain\\.tld$/$dnsrewrite=..."
+
 	tests := []struct {
-		name       string
-		rules      []string
-		targetRule string
-		want       []string
+		name         string
+		currentRules []string
+		newRule      string
+		rootDomain   string
+		want         []string
+		wantChanged  bool
 	}{
 		{
-			name:       "Remove existing rule",
-			rules:      []string{"rule1", "target", "rule2"},
-			targetRule: "target",
-			want:       []string{"rule1", "rule2"},
+			name:         "Fresh start",
+			currentRules: []string{"||other.com^"},
+			newRule:      newRule,
+			rootDomain:   root,
+			want:         []string{"||other.com^", newRule},
+			wantChanged:  true,
 		},
 		{
-			name:       "Remove multiple occurrences",
-			rules:      []string{"target", "rule1", "target"},
-			targetRule: "target",
-			want:       []string{"rule1"},
+			name:         "Already exists at bottom",
+			currentRules: []string{"||other.com^", newRule},
+			newRule:      newRule,
+			rootDomain:   root,
+			want:         []string{"||other.com^", newRule},
+			wantChanged:  false,
 		},
 		{
-			name:       "Rule not present",
-			rules:      []string{"rule1", "rule2"},
-			targetRule: "target",
-			want:       []string{"rule1", "rule2"},
+			name:         "Already exists but wrong position",
+			currentRules: []string{newRule, "||other.com^"},
+			newRule:      newRule,
+			rootDomain:   root,
+			want:         []string{"||other.com^", newRule},
+			wantChanged:  true,
 		},
 		{
-			name:       "Empty rules",
-			rules:      []string{},
-			targetRule: "target",
-			want:       nil, // append to nil slice returns nil if nothing appended? No, it returns a slice. Wait.
-			// In removeRule: var result []string. If loop doesn't append, it returns nil.
+			name:         "Remove old wildcard",
+			currentRules: []string{"||*.domain.tld^$dnsrewrite...", "||other.com^"},
+			newRule:      newRule,
+			rootDomain:   root,
+			want:         []string{"||other.com^", newRule},
+			wantChanged:  true,
+		},
+		{
+			name:         "Update existing smart rule",
+			currentRules: []string{"||other.com^", "/^(?!old$).+\\.domain\\.tld$/$dnsrewrite=NOERROR..."},
+			newRule:      newRule,
+			rootDomain:   root,
+			want:         []string{"||other.com^", newRule},
+			wantChanged:  true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := removeRule(tt.rules, tt.targetRule)
-			// Handle nil vs empty slice comparison if necessary, but reflect.DeepEqual handles nil and empty slice differently.
-			// removeRule returns nil if no elements are appended to result (which is initialized as nil).
-			if len(got) == 0 && len(tt.want) == 0 {
-				return
+			got, changed := applySmartRule(tt.currentRules, tt.newRule, tt.rootDomain)
+			if changed != tt.wantChanged {
+				t.Errorf("applySmartRule() changed = %v, want %v", changed, tt.wantChanged)
 			}
 			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("removeRule() = %v, want %v", got, tt.want)
+				t.Errorf("applySmartRule() got = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -125,7 +157,8 @@ func TestUpdateUserRules_ContentTypeHeader(t *testing.T) {
 		AdGuardURL:    server.URL,
 		AdGuardUser:   "testuser",
 		AdGuardPass:   "testpass",
-		TargetRule:    "testrule",
+		RootDomain:    "willwhite.dev",
+		FallbackIP:    "1.2.3.4",
 		CheckInterval: 60 * time.Second,
 		HealthPort:    "8080",
 	}
