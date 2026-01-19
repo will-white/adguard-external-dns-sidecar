@@ -6,61 +6,58 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 )
 
 func TestGenerateSmartRule(t *testing.T) {
 	tests := []struct {
-		name        string
-		hosts       []string
-		rootDomain  string
-		ip          string
-		wantPrefix  string
-		wantSuffix  string
-		wantContain string
+		name       string
+		hosts      []string
+		rootDomain string
+		ip         string
+		wantRules  []string
 	}{
 		{
-			name:        "Single Host",
-			hosts:       []string{"hass.willwhite.dev"},
-			rootDomain:  "willwhite.dev",
-			ip:          "10.0.0.1",
-			wantPrefix:  "/^(?!hass\\.willwhite\\.dev$).",
-			wantSuffix:  "$dnsrewrite=NOERROR;A;10.0.0.1",
-			wantContain: "willwhite\\.dev",
+			name:       "Single Host",
+			hosts:      []string{"hass.willwhite.dev"},
+			rootDomain: "willwhite.dev",
+			ip:         "10.0.0.1",
+			wantRules: []string{
+				ManagedBlockStart,
+				"||*.willwhite.dev^$dnsrewrite=NOERROR;A;10.0.0.1,denyallow=hass.willwhite.dev",
+				ManagedBlockEnd,
+			},
 		},
 		{
-			name:        "Multiple Hosts",
-			hosts:       []string{"hass.willwhite.dev", "plex.willwhite.dev"},
-			rootDomain:  "willwhite.dev",
-			ip:          "192.168.1.1",
-			wantPrefix:  "/^(?!hass\\.willwhite\\.dev$|plex\\.willwhite\\.dev$)",
-			wantSuffix:  "192.168.1.1",
-			wantContain: "|",
+			name:       "Mixed Hosts",
+			hosts:      []string{"hass.willwhite.dev", "plex.com"}, // plex.com should be ignored
+			rootDomain: "willwhite.dev",
+			ip:         "192.168.1.1",
+			wantRules: []string{
+				ManagedBlockStart,
+				"||*.willwhite.dev^$dnsrewrite=NOERROR;A;192.168.1.1,denyallow=hass.willwhite.dev",
+				ManagedBlockEnd,
+			},
 		},
 		{
-			name:        "No Hosts",
-			hosts:       []string{},
-			rootDomain:  "willwhite.dev",
-			ip:          "10.0.0.1",
-			wantPrefix:  "||*.willwhite.dev^",
-			wantSuffix:  "10.0.0.1",
-			wantContain: "$dnsrewrite=NOERROR",
+			name:       "No Hosts",
+			hosts:      []string{},
+			rootDomain: "willwhite.dev",
+			ip:         "10.0.0.1",
+			wantRules: []string{
+				ManagedBlockStart,
+				"||*.willwhite.dev^$dnsrewrite=NOERROR;A;10.0.0.1",
+				ManagedBlockEnd,
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := generateSmartRule(tt.hosts, tt.rootDomain, tt.ip)
-			if !strings.HasPrefix(got, tt.wantPrefix) {
-				t.Errorf("generateSmartRule() prefix = %v, want prefix %v", got, tt.wantPrefix)
-			}
-			if !strings.HasSuffix(got, tt.wantSuffix) {
-				t.Errorf("generateSmartRule() suffix = %v, want suffix %v", got, tt.wantSuffix)
-			}
-			if tt.wantContain != "" && !strings.Contains(got, tt.wantContain) {
-				t.Errorf("generateSmartRule() does not contain %v", tt.wantContain)
+			if !reflect.DeepEqual(got, tt.wantRules) {
+				t.Errorf("generateSmartRule() = %v, want %v", got, tt.wantRules)
 			}
 		})
 	}
@@ -68,61 +65,57 @@ func TestGenerateSmartRule(t *testing.T) {
 
 func TestApplySmartRule(t *testing.T) {
 	root := "domain.tld"
-	newRule := "/^(?!host1$).+\\.domain\\.tld$/$dnsrewrite=..."
+	newBlock := []string{
+		ManagedBlockStart,
+		"||*.domain.tld^$dnsrewrite=NOERROR;A;...,denyallow=host1.domain.tld",
+		ManagedBlockEnd,
+	}
 
 	tests := []struct {
 		name         string
 		currentRules []string
-		newRule      string
+		newBlock     []string
 		rootDomain   string
 		want         []string
 		wantChanged  bool
 	}{
 		{
-			name:         "Fresh start",
-			currentRules: []string{"||other.com^"},
-			newRule:      newRule,
+			name:         "Fresh start with cleanup",
+			currentRules: []string{"||other.com^", "||*.domain.tld^NoRewite"},
+			newBlock:     newBlock,
 			rootDomain:   root,
-			want:         []string{"||other.com^", newRule},
+			want:         append([]string{"||other.com^"}, newBlock...),
 			wantChanged:  true,
 		},
 		{
-			name:         "Already exists at bottom",
-			currentRules: []string{"||other.com^", newRule},
-			newRule:      newRule,
+			name:         "Already exists identical",
+			currentRules: append([]string{"||other.com^"}, newBlock...),
+			newBlock:     newBlock,
 			rootDomain:   root,
-			want:         []string{"||other.com^", newRule},
+			want:         append([]string{"||other.com^"}, newBlock...),
 			wantChanged:  false,
 		},
 		{
-			name:         "Already exists but wrong position",
-			currentRules: []string{newRule, "||other.com^"},
-			newRule:      newRule,
+			name:         "Update existing block",
+			currentRules: []string{ManagedBlockStart, "OldContent", ManagedBlockEnd},
+			newBlock:     newBlock,
 			rootDomain:   root,
-			want:         []string{"||other.com^", newRule},
+			want:         newBlock,
 			wantChanged:  true,
 		},
 		{
-			name:         "Remove old wildcard",
-			currentRules: []string{"||*.domain.tld^$dnsrewrite...", "||other.com^"},
-			newRule:      newRule,
+			name:         "Migrate legacy regex",
+			currentRules: []string{"||other.com^", "/^(?!host$).+\\.domain\\.tld$/$dnsrewrite..."},
+			newBlock:     newBlock,
 			rootDomain:   root,
-			want:         []string{"||other.com^", newRule},
-			wantChanged:  true,
-		},
-		{
-			name:         "Update existing smart rule",
-			currentRules: []string{"||other.com^", "/^(?!old$).+\\.domain\\.tld$/$dnsrewrite=NOERROR..."},
-			newRule:      newRule,
-			rootDomain:   root,
-			want:         []string{"||other.com^", newRule},
+			want:         append([]string{"||other.com^"}, newBlock...),
 			wantChanged:  true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, changed := applySmartRule(tt.currentRules, tt.newRule, tt.rootDomain)
+			got, changed := applySmartRule(tt.currentRules, tt.newBlock, tt.rootDomain)
 			if changed != tt.wantChanged {
 				t.Errorf("applySmartRule() changed = %v, want %v", changed, tt.wantChanged)
 			}

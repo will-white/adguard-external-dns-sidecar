@@ -36,6 +36,8 @@ type FilteringStatus struct {
 var (
 	healthy     = true
 	lastCheckOK = true
+	ManagedBlockStart = "! -- ADGUARD EXTERNAL DNS SIDECAR START --"
+	ManagedBlockEnd   = "! -- ADGUARD EXTERNAL DNS SIDECAR END --"
 )
 
 func main() {
@@ -173,9 +175,6 @@ func syncRules(config Config, k8sClient K8sClient) error {
 		return fmt.Errorf("failed to fetch ingress hosts: %w", err)
 	}
 
-	// Generate the dynamic rule
-	newSmartRule := generateSmartRule(hosts, config.RootDomain, config.FallbackIP)
-
 	// Fetch current rules
 	rules, err := fetchUserRules(config)
 	if err != nil {
@@ -183,7 +182,8 @@ func syncRules(config Config, k8sClient K8sClient) error {
 	}
 
 	// Process rules
-	updatedRules, needsUpdate := applySmartRule(rules, newSmartRule, config.RootDomain)
+	newRules := generateSmartRule(hosts, config.RootDomain, config.FallbackIP)
+	updatedRules, needsUpdate := applySmartRule(rules, newRules, config.RootDomain)
 
 	if !needsUpdate {
 		return nil
@@ -200,92 +200,102 @@ func syncRules(config Config, k8sClient K8sClient) error {
 	return nil
 }
 
-// generateSmartRule creates the negative lookahead regex
-func generateSmartRule(hosts []string, rootDomain, ip string) string {
-	// If no hosts, default to catch-all for the domain
-	if len(hosts) == 0 {
-		return fmt.Sprintf("||*.%s^$dnsrewrite=NOERROR;A;%s", rootDomain, ip)
-	}
+// generateSmartRule creates the list of rules to be applied
+func generateSmartRule(hosts []string, rootDomain, ip string) []string {
+	var rules []string
 
-	var escapedHosts []string
+	rules = append(rules, ManagedBlockStart)
+
+	// We use the $denyallow modifier to exempt known hosts from the catch-all rewrite.
+	// This allows other specific rules (like those from ExternalDNS) to take precedence
+	// or for the query to pass through if no other rule exists.
+	// Syntax: ||*.root^$dnsrewrite=...,denyallow=host1|host2
+
+	var deniedHosts []string
 	for _, h := range hosts {
-		// We care about full FQDNs.
-		// Regex: (?!host1\.domain\.com$|host2\.domain\.com$)
-		escaped := regexp.QuoteMeta(h)
-		escapedHosts = append(escapedHosts, escaped+"$")
+		if strings.HasSuffix(h, "."+rootDomain) {
+			deniedHosts = append(deniedHosts, h)
+		}
 	}
 
-	// Join with pipe
-	exclusionGroup := strings.Join(escapedHosts, "|")
+	wildcardRule := fmt.Sprintf("||*.%s^$dnsrewrite=NOERROR;A;%s", rootDomain, ip)
 
-	// Final Regex
-	// /^(?!host1$|host2$).+\.willwhite\.dev$/
-	// Note: We need to escape the root domain too for the matching part
-	escapedRoot := regexp.QuoteMeta(rootDomain)
+	if len(deniedHosts) > 0 {
+		denyList := strings.Join(deniedHosts, "|")
+		wildcardRule = fmt.Sprintf("%s,denyallow=%s", wildcardRule, denyList)
+	}
 
-	// AdGuard Regex: /regex/$options
-	return fmt.Sprintf("/^(?!%s).+\\.%s$/$dnsrewrite=NOERROR;A;%s", exclusionGroup, escapedRoot, ip)
+	rules = append(rules, wildcardRule)
+	rules = append(rules, ManagedBlockEnd)
+	return rules
 }
 
-// applySmartRule filters out old/conflicting rules and appends the new one
-func applySmartRule(currentRules []string, newRule string, rootDomain string) ([]string, bool) {
-	var result []string
-	var changed bool
+// applySmartRule update the rules list with the new managed block
+func applySmartRule(currentRules []string, newManagedBlock []string, rootDomain string) ([]string, bool) {
+	var preBlock []string
+	var inManagedBlock bool
+	var foundManagedBlock bool
 
-	// Definitions of what to remove:
-	// 1. Old static wildcard: ||*.rootDomain^...
-	// 2. regex rules targeting rootDomain
-
-	oldWildcardStart := fmt.Sprintf("||*.%s^", rootDomain)
-
-	foundExactMatch := false
-
+	// Scan current rules to split into pre-block and post-block
+	// and identify if we have an existing managed block
 	for _, r := range currentRules {
-		// If it matches existing exact rule, we skip adding it here (will append later)
-		if r == newRule {
-			foundExactMatch = true
+		if r == ManagedBlockStart {
+			inManagedBlock = true
+			foundManagedBlock = true
+			continue
+		}
+		if r == ManagedBlockEnd {
+			inManagedBlock = false
 			continue
 		}
 
-		// Check if it is a rule we should manage (delete)
-		if strings.HasPrefix(r, oldWildcardStart) {
-			changed = true
-			continue // Drop it
-		}
-
-		// Basic check for managed regex rule for this domain
-		// This is a heuristic. We assume any regex rule matching our root domain is ours.
-		// We check for the escaped root domain because regex rules will have it escaped.
-		escapedRoot := regexp.QuoteMeta(rootDomain)
-		if strings.HasPrefix(r, "/") && strings.Contains(r, escapedRoot) && strings.Contains(r, "$dnsrewrite") {
-			changed = true
+		if inManagedBlock {
+			// We skip the old managed content
 			continue
 		}
 
-		result = append(result, r)
-	}
-
-	// Always append the new rule at the bottom
-	result = append(result, newRule)
-
-	// Determine if update is needed
-	if !foundExactMatch {
-		changed = true
-	} else {
-		// Check order and content match
-		if len(result) != len(currentRules) {
-			changed = true
-		} else {
-			for i, v := range result {
-				if v != currentRules[i] {
-					changed = true
-					break
-				}
+		// Cleanup legacy rules if we didn't find a proper block yet
+		// (This handles migration from v0.1/v0.2 logic)
+		if !foundManagedBlock {
+			// 1. Old static wildcard: ||*.rootDomain^...
+			oldWildcardStart := fmt.Sprintf("||*.%s^", rootDomain)
+			if strings.HasPrefix(r, oldWildcardStart) {
+				continue
+			}
+			// 2. Old regex rules
+			escapedRoot := regexp.QuoteMeta(rootDomain)
+			if strings.HasPrefix(r, "/") && strings.Contains(r, escapedRoot) && strings.Contains(r, "$dnsrewrite") {
+				continue
 			}
 		}
+
+		// Keep user rule
+		preBlock = append(preBlock, r)
 	}
 
-	return result, changed
+	// If we are appending to the end (no post-block logic needed really, effectively we wiped the old block)
+	// But wait, if user had rules AFTER our block?
+	// The loop above puts everything NOT in the block into `preBlock`.
+	// This creates a side effect: our block always moves to the end.
+	// This is generally fine or even desired ensuring priority?
+	// Actually, careful: In AdGuard, order matters.
+	// Exceptions (@@) generally override regardless of position, but wildcards vs allowlists...
+	// If we simply rebuild the list as [UserRules... NewBlock...], that is safe.
+
+	// Construct candidate new list
+	result := append(preBlock, newManagedBlock...)
+
+	// Compare with currentRules to see if anything changed
+	if len(result) != len(currentRules) {
+		return result, true
+	}
+	for i, v := range result {
+		if v != currentRules[i] {
+			return result, true
+		}
+	}
+
+	return result, false
 }
 
 func fetchUserRules(config Config) ([]string, error) {
