@@ -13,7 +13,7 @@ COPY go.mod ./
 RUN go mod download
 
 # Copy source code
-COPY main.go ./
+COPY *.go ./
 
 # Build the binary with static linking for multiple architectures
 ARG TARGETOS=linux
