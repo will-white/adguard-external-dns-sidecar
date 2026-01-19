@@ -6,19 +6,16 @@ RUN apk --no-cache add ca-certificates tzdata
 
 WORKDIR /build
 
-# Copy go.mod and go.sum (if it exists)
+# Copy go.mod
 COPY go.mod ./
 
-# Download dependencies
-RUN go mod download
-
 # Copy source code
-COPY *.go ./
+COPY main.go k8s.go ./
 
 # Build the binary with static linking for multiple architectures
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -installsuffix cgo -ldflags="-w -s" -o adguard-sidecar .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -installsuffix cgo -ldflags="-w -s" -o adguard-sidecar main.go k8s.go
 
 # Final stage - use scratch for minimal image size
 FROM scratch
