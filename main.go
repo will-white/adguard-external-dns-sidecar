@@ -34,8 +34,8 @@ type FilteringStatus struct {
 
 // Health status for the health check endpoint
 var (
-	healthy     = true
-	lastCheckOK = true
+	healthy           = true
+	lastCheckOK       = true
 	ManagedBlockStart = "! -- ADGUARD EXTERNAL DNS SIDECAR START --"
 	ManagedBlockEnd   = "! -- ADGUARD EXTERNAL DNS SIDECAR END --"
 )
