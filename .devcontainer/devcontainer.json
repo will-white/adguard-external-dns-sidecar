@@ -1,10 +1,34 @@
 {
 	"name": "AdGuard External-DNS Sidecar",
-	"image": "mcr.microsoft.com/devcontainers/go:1-1.21-bookworm",
-	
-	"features": {
-		"ghcr.io/devcontainers/features/docker-in-docker:2": {}
+	// Built from a local Dockerfile only to strip a broken apt source from the
+	// upstream image - see .devcontainer/Dockerfile for why.
+	"build": {
+		"dockerfile": "Dockerfile"
 	},
+
+	"features": {
+		"ghcr.io/devcontainers/features/docker-in-docker:2": {},
+		// Claude Code installs via `npm install -g`, so Node must come first.
+		// Pinned to LTS deliberately: the claude-code feature's own fallback
+		// installs Node 18.
+		"ghcr.io/devcontainers/features/node:1": {
+			"version": "lts"
+		},
+		// Also contributes the anthropic.claude-code VS Code extension, and
+		// installs an opt-in outbound firewall at /usr/local/bin/init-firewall.sh.
+		// Do NOT enable that firewall here: its allowlist covers GitHub, npm and
+		// the Anthropic API but not proxy.golang.org, so it would block the Go
+		// toolchain download this image relies on.
+		"ghcr.io/anthropics/devcontainer-features/claude-code:1": {}
+	},
+
+	// Persist Claude Code's login, settings and history across rebuilds.
+	// The volume mounts root-owned, so postCreateCommand fixes ownership.
+	// To share the host's existing login instead, swap for a bind mount:
+	//   "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind"
+	"mounts": [
+		"source=claude-config-${devcontainerId},target=/home/vscode/.claude,type=volume"
+	],
 
 	"customizations": {
 		"vscode": {
@@ -19,7 +43,10 @@
 		}
 	},
 
-	"postCreateCommand": "go mod download",
+	// `go vet` (not `go build`) warms the toolchain and build cache without
+	// dropping a stray binary in the workspace. It also triggers the
+	// GOTOOLCHAIN download for the version go.mod requires.
+	"postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && go mod download && go vet ./...",
 
 	"remoteUser": "vscode"
 }
