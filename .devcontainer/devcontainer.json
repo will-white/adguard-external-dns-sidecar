@@ -7,7 +7,7 @@
 	},
 
 	"features": {
-		"ghcr.io/devcontainers/features/docker-in-docker:2": {},
+		"ghcr.io/devcontainers/features/docker-in-docker:4": {},
 		// Claude Code installs via `npm install -g`, so Node must come first.
 		// Pinned to LTS deliberately: the claude-code feature's own fallback
 		// installs Node 18.
