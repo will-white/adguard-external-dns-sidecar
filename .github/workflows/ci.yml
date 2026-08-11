@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [ main ]
 
+# Supersede in-flight PR runs (a dependency backlog can queue a lot of them),
+# but never cancel a run on main.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # CI uses the shared build workflow with push disabled
 # This ensures CI and CD use identical build processes
 jobs:
