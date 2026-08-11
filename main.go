@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,13 +33,29 @@ type FilteringStatus struct {
 	UserRules []string `json:"user_rules"`
 }
 
-// Health status for the health check endpoint
+// Health status for the health check endpoint. These are written by the sync
+// loop and read by the health server goroutine, so they must be atomic.
 var (
-	healthy           = true
-	lastCheckOK       = true
+	healthy     atomic.Bool
+	lastCheckOK atomic.Bool
+)
+
+// Sentinels delimiting the block of rules this sidecar owns. Changing either
+// string orphans the block in every existing AdGuard install, so treat them as
+// part of the on-disk format.
+const (
 	ManagedBlockStart = "! -- ADGUARD EXTERNAL DNS SIDECAR START --"
 	ManagedBlockEnd   = "! -- ADGUARD EXTERNAL DNS SIDECAR END --"
 )
+
+// Shared client so syncs reuse connections instead of building a new transport
+// every CHECK_INTERVAL.
+var adguardClient = &http.Client{Timeout: 10 * time.Second}
+
+func init() {
+	healthy.Store(true)
+	lastCheckOK.Store(true)
+}
 
 func main() {
 	flag.Parse()
@@ -82,42 +99,48 @@ func main() {
 	// Run immediately on startup
 	if err := syncRules(config, k8sClient); err != nil {
 		log.Printf("Error on initial check: %v", err)
-		lastCheckOK = false
+		lastCheckOK.Store(false)
 	} else {
-		lastCheckOK = true
+		lastCheckOK.Store(true)
 	}
 
 	// Then run on interval
 	for range ticker.C {
 		if err := syncRules(config, k8sClient); err != nil {
 			log.Printf("Error syncing rules: %v", err)
-			lastCheckOK = false
+			lastCheckOK.Store(false)
 		} else {
-			lastCheckOK = true
+			lastCheckOK.Store(true)
 		}
 	}
 }
 
-func startHealthServer(port string) {
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if healthy && lastCheckOK {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("OK"))
-		} else {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte("UNHEALTHY"))
-		}
-	})
-
-	http.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+// handleHealthz reports whether the last sync succeeded. It is deliberately NOT
+// a liveness signal: AdGuard being down must not restart this process.
+func handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if healthy.Load() && lastCheckOK.Load() {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("READY"))
-	})
+		w.Write([]byte("OK"))
+	} else {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("UNHEALTHY"))
+	}
+}
+
+// handleReadyz reports that the process is up, regardless of sync state.
+func handleReadyz(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("READY"))
+}
+
+func startHealthServer(port string) {
+	http.HandleFunc("/healthz", handleHealthz)
+	http.HandleFunc("/readyz", handleReadyz)
 
 	log.Printf("Health server listening on port %s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Printf("Health server error: %v", err)
-		healthy = false
+		healthy.Store(false)
 	}
 }
 
@@ -273,15 +296,10 @@ func applySmartRule(currentRules []string, newManagedBlock []string, rootDomain 
 		preBlock = append(preBlock, r)
 	}
 
-	// If we are appending to the end (no post-block logic needed really, effectively we wiped the old block)
-	// But wait, if user had rules AFTER our block?
-	// The loop above puts everything NOT in the block into `preBlock`.
-	// This creates a side effect: our block always moves to the end.
-	// This is generally fine or even desired ensuring priority?
-	// Actually, careful: In AdGuard, order matters.
-	// Exceptions (@@) generally override regardless of position, but wildcards vs allowlists...
-	// If we simply rebuild the list as [UserRules... NewBlock...], that is safe.
-
+	// Every rule outside the managed block landed in preBlock, so rebuilding as
+	// [user rules..., managed block] always moves our block to the end. That is
+	// deliberate: the catch-all wildcard must sit below any specific rule it
+	// could otherwise shadow.
 	// Construct candidate new list
 	result := append(preBlock, newManagedBlock...)
 
@@ -308,8 +326,7 @@ func fetchUserRules(config Config) ([]string, error) {
 
 	req.SetBasicAuth(config.AdGuardUser, config.AdGuardPass)
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := adguardClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -351,8 +368,7 @@ func updateUserRules(config Config, rules []string) error {
 	req.SetBasicAuth(config.AdGuardUser, config.AdGuardPass)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := adguardClient.Do(req)
 	if err != nil {
 		return err
 	}
