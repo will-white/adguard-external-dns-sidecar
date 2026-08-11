@@ -1,0 +1,19 @@
+# Compiled binary (name matches the Dockerfile output and README instructions)
+/adguard-sidecar
+/adguard-external-dns-sidecar
+
+# Test and coverage output
+*.test
+*.out
+coverage.*
+
+# Resolved by the devcontainer CLI/VS Code; feature refs float on purpose so
+# Renovate can bump them
+.devcontainer/devcontainer-lock.json
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
