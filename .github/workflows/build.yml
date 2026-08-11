@@ -188,10 +188,32 @@ jobs:
             sleep 1
           done
 
-          # AdGuard is unreachable here, so the sync must mark the sidecar
-          # unhealthy - proving the readiness/liveness split actually works.
-          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/healthz)
-          echo "/healthz -> $code (503 expected: AdGuard is unreachable)"
+          echo "--- unreachable AdGuard must mark the sidecar unhealthy ---"
+          # Both health flags start true, so /healthz legitimately answers 200
+          # until the first sync fails: poll rather than sampling once. Reaching
+          # 503 while /readyz stays 200 is the readiness/liveness split working.
+          for i in $(seq 1 15); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/healthz || true)
+            if [ "$code" = "503" ]; then
+              echo "OK: /healthz -> 503 after ${i}s"
+              break
+            fi
+            if [ "$i" = 15 ]; then
+              echo "::error::/healthz stayed $code; expected 503 while AdGuard is unreachable"
+              docker logs smoke || true
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # /readyz must still be serving 200 - an AdGuard outage must not look
+          # like a dead process, or Kubernetes would restart it.
+          ready=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/readyz || true)
+          if [ "$ready" != "200" ]; then
+            echo "::error::/readyz -> $ready while unhealthy; expected 200"
+            exit 1
+          fi
+          echo "OK: /readyz still 200 while unhealthy"
 
           echo "--- container logs ---"
           docker logs smoke
