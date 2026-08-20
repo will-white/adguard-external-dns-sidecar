@@ -1,7 +1,7 @@
 # Build stage
 # --platform=$BUILDPLATFORM keeps the compiler running natively and cross-compiles
 # via GOOS/GOARCH, which is far faster than emulating the target under QEMU.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine3.24 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine3.24 AS builder
 
 # Install SSL certificates (required for HTTPS requests)
 RUN apk --no-cache add ca-certificates tzdata
