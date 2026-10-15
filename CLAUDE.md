@@ -26,9 +26,10 @@ docker compose up -d && docker compose logs -f adguard-sidecar
 
 ## Architecture
 
-Single-package (`package main`) sidecar, **Go standard library only** — `go.mod` has zero dependencies and should stay that way. Two source files:
+Single-package (`package main`) sidecar, **Go standard library only** — `go.mod` has zero dependencies and should stay that way. Three source files:
 
 - `main.go` — config, health server, poll loop, and the rule reconciliation logic (`generateSmartRule`, `applySmartRule`).
+- `static.go` — `STATIC_RECORDS` parsing and rendering (exact-host rewrites for non-Ingress hosts; see "Static mode" in the README).
 - `k8s.go` — `K8sClient` interface with two implementations: `ClusterClient` (raw REST against `KUBERNETES_SERVICE_HOST` using the mounted service-account token + CA) and `MockClient` (returned automatically when `KUBERNETES_SERVICE_HOST` is unset, i.e. local/dev, and returns an empty host list). The interface exists so tests can substitute hosts without a cluster.
 
 ### Reconciliation model

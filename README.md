@@ -48,7 +48,9 @@ All configuration is via environment variables:
 | `ADGUARD_USER` | ✅ Yes | - | AdGuard Home admin username |
 | `ADGUARD_PASS` | ✅ Yes | - | AdGuard Home admin password |
 | `ROOT_DOMAIN` | ✅ Yes | - | Root domain to manage, e.g. `domain.tld` (a leading dot is stripped) |
-| `FALLBACK_IP` | ✅ Yes | - | IP that unmatched hosts under `ROOT_DOMAIN` rewrite to |
+| `FALLBACK_IP` | ✅ Unless `WILDCARD_FALLBACK=false` | - | IP that unmatched hosts under `ROOT_DOMAIN` rewrite to |
+| `WILDCARD_FALLBACK` | ❌ No | `true` | `false` drops the catch-all wildcard; only external-dns rules and `STATIC_RECORDS` resolve locally |
+| `STATIC_RECORDS` | ❌ No | - | Comma-separated `name=ip` pairs written as exact rewrites inside the managed block, e.g. `nas=192.168.1.1,adguard=192.168.1.2`. A bare label is qualified with `ROOT_DOMAIN`. IPv6 addresses become `AAAA` |
 | `CHECK_INTERVAL` | ❌ No | `60` | Seconds between syncs |
 | `HEALTH_PORT` | ❌ No | `8080` | Port for the health endpoints |
 
@@ -58,6 +60,12 @@ All configuration is via environment variables:
 - The wildcard `||*.domain.tld^` matches subdomains, **not** the apex `domain.tld` itself.
 - `CHECK_INTERVAL`: 30–300 seconds is a sensible range. Lower values increase load on both APIs.
 - Missing or invalid required variables cause an immediate exit — the sidecar fails fast on misconfiguration but retries indefinitely on API errors.
+
+### Static mode (no wildcard)
+
+AdGuard answers with the **union** of every rewrite that matches a name; a specific rule does not override the wildcard. So any host the wildcard also matches, but that is not an Ingress (a `LoadBalancer` Service, a host outside the cluster), answers with both its own address and `FALLBACK_IP`, and clients land on the wrong one part of the time.
+
+Setting `WILDCARD_FALLBACK=false` and listing the non-cluster hosts in `STATIC_RECORDS` avoids that class entirely: every name gets exactly one answer, and names nobody declared fall through to upstream DNS. The cost is that a new non-cluster host needs one entry. In wildcard mode, static hosts are added to the `denyallow` list automatically so they never pick up the fallback address.
 
 ## Health Endpoints
 

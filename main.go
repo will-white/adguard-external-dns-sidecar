@@ -27,6 +27,12 @@ type Config struct {
 	FallbackIP    string
 	CheckInterval time.Duration
 	HealthPort    string
+	// NoWildcard turns off the catch-all `||*.root^` rewrite to FallbackIP.
+	// Disabling it means only exact names resolve locally: external-dns's own
+	// rules plus StaticRecords. Everything else falls through to upstream DNS.
+	NoWildcard bool
+	// StaticRecords are exact-host rewrites for names that are not Ingresses.
+	StaticRecords []StaticRecord
 }
 
 type FilteringStatus struct {
@@ -150,8 +156,31 @@ func loadConfig() Config {
 		AdGuardUser: getEnvOrFatal("ADGUARD_USER"),
 		AdGuardPass: getEnvOrFatal("ADGUARD_PASS"),
 		RootDomain:  getEnvOrFatal("ROOT_DOMAIN"),
-		FallbackIP:  getEnvOrFatal("FALLBACK_IP"),
 	}
+
+	// Normalize root domain (remove leading dot) before anything derives from it.
+	config.RootDomain = strings.TrimPrefix(config.RootDomain, ".")
+
+	if v := os.Getenv("WILDCARD_FALLBACK"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			log.Fatalf("WILDCARD_FALLBACK must be true or false: %v", err)
+		}
+		config.NoWildcard = !b
+	}
+
+	// FALLBACK_IP only feeds the wildcard, so it is required only with it.
+	if !config.NoWildcard {
+		config.FallbackIP = getEnvOrFatal("FALLBACK_IP")
+	} else {
+		config.FallbackIP = os.Getenv("FALLBACK_IP")
+	}
+
+	records, err := parseStaticRecords(os.Getenv("STATIC_RECORDS"), config.RootDomain)
+	if err != nil {
+		log.Fatalf("STATIC_RECORDS: %v", err)
+	}
+	config.StaticRecords = records
 
 	// Parse CHECK_INTERVAL with default
 	intervalStr := os.Getenv("CHECK_INTERVAL")
@@ -176,9 +205,6 @@ func loadConfig() Config {
 
 	// Ensure URL doesn't end with slash
 	config.AdGuardURL = strings.TrimSuffix(config.AdGuardURL, "/")
-
-	// Normalize root domain (remove leading dot)
-	config.RootDomain = strings.TrimPrefix(config.RootDomain, ".")
 
 	return config
 }
@@ -205,7 +231,7 @@ func syncRules(config Config, k8sClient K8sClient) error {
 	}
 
 	// Process rules
-	newRules := generateSmartRule(hosts, config.RootDomain, config.FallbackIP)
+	newRules := generateRules(hosts, config)
 	updatedRules, needsUpdate := applySmartRule(rules, newRules, config.RootDomain)
 
 	if !needsUpdate {
@@ -223,34 +249,54 @@ func syncRules(config Config, k8sClient K8sClient) error {
 	return nil
 }
 
-// generateSmartRule creates the list of rules to be applied
+// generateSmartRule creates the managed block for the default mode: the
+// catch-all wildcard alone, with no static records.
 func generateSmartRule(hosts []string, rootDomain, ip string) []string {
-	var rules []string
+	return generateRules(hosts, Config{RootDomain: rootDomain, FallbackIP: ip})
+}
 
-	rules = append(rules, ManagedBlockStart)
+// generateRules creates the managed block: one exact rewrite per static record,
+// then (unless disabled) the catch-all wildcard. Static hosts are added to the
+// wildcard's denyallow list too. AdGuard returns the union of every matching
+// rewrite rather than letting the specific rule win, so a static record that
+// the wildcard also matched would answer with both addresses.
+func generateRules(hosts []string, config Config) []string {
+	rules := []string{ManagedBlockStart}
+	for _, r := range config.StaticRecords {
+		rules = append(rules, r.Rule())
+	}
+	if !config.NoWildcard {
+		exempt := append([]string(nil), hosts...)
+		for _, r := range config.StaticRecords {
+			exempt = append(exempt, r.Host)
+		}
+		rules = append(rules, wildcardRule(exempt, config.RootDomain, config.FallbackIP))
+	}
+	return append(rules, ManagedBlockEnd)
+}
 
+// wildcardRule renders the catch-all rewrite with its denyallow exemptions.
+func wildcardRule(hosts []string, rootDomain, ip string) string {
 	// We use the $denyallow modifier to exempt known hosts from the catch-all rewrite.
 	// This allows other specific rules (like those from ExternalDNS) to take precedence
 	// or for the query to pass through if no other rule exists.
 	// Syntax: ||*.root^$dnsrewrite=...,denyallow=host1|host2
 
 	var deniedHosts []string
+	seen := make(map[string]bool)
 	for _, h := range hosts {
-		if strings.HasSuffix(h, "."+rootDomain) {
+		if strings.HasSuffix(h, "."+rootDomain) && !seen[h] {
 			deniedHosts = append(deniedHosts, h)
+			seen[h] = true
 		}
 	}
 
-	wildcardRule := fmt.Sprintf("||*.%s^$dnsrewrite=NOERROR;A;%s", rootDomain, ip)
+	rule := fmt.Sprintf("||*.%s^$dnsrewrite=NOERROR;A;%s", rootDomain, ip)
 
 	if len(deniedHosts) > 0 {
-		denyList := strings.Join(deniedHosts, "|")
-		wildcardRule = fmt.Sprintf("%s,denyallow=%s", wildcardRule, denyList)
+		rule = fmt.Sprintf("%s,denyallow=%s", rule, strings.Join(deniedHosts, "|"))
 	}
-
-	rules = append(rules, wildcardRule)
-	rules = append(rules, ManagedBlockEnd)
-	return rules
+	return rule
 }
 
 // applySmartRule update the rules list with the new managed block
