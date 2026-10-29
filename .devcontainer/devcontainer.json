@@ -11,7 +11,7 @@
 		// Claude Code installs via `npm install -g`, so Node must come first.
 		// Pinned to LTS deliberately: the claude-code feature's own fallback
 		// installs Node 18.
-		"ghcr.io/devcontainers/features/node:1": {
+		"ghcr.io/devcontainers/features/node:2": {
 			"version": "lts"
 		},
 		// Also contributes the anthropic.claude-code VS Code extension, and
