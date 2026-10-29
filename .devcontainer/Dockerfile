@@ -2,7 +2,7 @@
 #
 # 1-1.24 is the newest Go devcontainer image upstream publishes, while go.mod
 # targets a newer Go. See GOTOOLCHAIN below for how that gap is closed.
-FROM mcr.microsoft.com/devcontainers/go:1-1.24-bookworm
+FROM mcr.microsoft.com/devcontainers/go:2-1.24-bookworm
 
 # The image hard-sets GOTOOLCHAIN=local, so a go.mod requiring a newer Go fails
 # outright:
