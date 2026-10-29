@@ -3,6 +3,7 @@ package main
 import (
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -22,10 +23,10 @@ func TestParseStaticRecords(t *testing.T) {
 		rules = append(rules, r.Rule())
 	}
 	want := []string{
-		"|nas.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.1,important",
-		"|adguard.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.2,important",
-		"|v6.domain.tld^$dnsrewrite=NOERROR;AAAA;2001:db8::1,important",
-		"|upper.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.3,important",
+		"|nas.domain.tld^$dnsrewrite=192.0.2.1,important",
+		"|adguard.domain.tld^$dnsrewrite=192.0.2.2,important",
+		"|v6.domain.tld^$dnsrewrite=2001:db8::1,important",
+		"|upper.domain.tld^$dnsrewrite=192.0.2.3,important",
 	}
 	if !reflect.DeepEqual(rules, want) {
 		t.Errorf("rules = %v, want %v", rules, want)
@@ -55,7 +56,7 @@ func TestGenerateRulesStaticOnly(t *testing.T) {
 	got := generateRules([]string{"hass.domain.tld"}, config)
 	want := []string{
 		ManagedBlockStart,
-		"|nas.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.1,important",
+		"|nas.domain.tld^$dnsrewrite=192.0.2.1,important",
 		ManagedBlockEnd,
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -71,8 +72,8 @@ func TestGenerateRulesStaticPlusWildcardExemptsStatics(t *testing.T) {
 	got := generateRules([]string{"hass.domain.tld"}, config)
 	want := []string{
 		ManagedBlockStart,
-		"|adguard.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.2,important",
-		"|hass.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.3,important",
+		"|adguard.domain.tld^$dnsrewrite=192.0.2.2,important",
+		"|hass.domain.tld^$dnsrewrite=192.0.2.3,important",
 		"||*.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.254,denyallow=hass.domain.tld|adguard.domain.tld",
 		ManagedBlockEnd,
 	}
@@ -132,10 +133,54 @@ func TestSyncRulesStaticModeReplacesWildcardBlock(t *testing.T) {
 	want := []string{
 		"||keep.me^",
 		ManagedBlockStart,
-		"|nas.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.1,important",
+		"|nas.domain.tld^$dnsrewrite=192.0.2.1,important",
 		ManagedBlockEnd,
 	}
 	if got, _ := stub.snapshot(); !reflect.DeepEqual(got, want) {
 		t.Errorf("rules = %v, want %v", got, want)
+	}
+}
+
+func TestSyncRulesRemovesStrayStaticCopies(t *testing.T) {
+	// external-dns's AdGuard provider used to lift full-form static records out
+	// of the block on every write, leaving one more copy each time. Copies in
+	// either form are ours and collapse back to the single in-block rule; the
+	// provider's records for other names stay.
+	stub := &adguardStub{rules: []string{
+		"||keep.me^",
+		"|nas.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.1,important",
+		"|hass.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.50,important",
+		"|nas.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.1,important",
+		"|nas.domain.tld^$dnsrewrite=192.0.2.1,important",
+		ManagedBlockStart,
+		ManagedBlockEnd,
+		"|nas.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.1,important",
+	}}
+	server := httptest.NewServer(stub.handler())
+	defer server.Close()
+
+	config := Config{AdGuardURL: server.URL, RootDomain: "domain.tld", NoWildcard: true, StaticRecords: mustRecords(t, "nas=192.0.2.1")}
+	if err := syncRules(config, &stubK8sClient{}); err != nil {
+		t.Fatalf("syncRules() error = %v", err)
+	}
+	want := []string{
+		"||keep.me^",
+		"|hass.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.50,important",
+		ManagedBlockStart,
+		"|nas.domain.tld^$dnsrewrite=192.0.2.1,important",
+		ManagedBlockEnd,
+	}
+	if got, _ := stub.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("rules = %v, want %v", got, want)
+	}
+}
+
+func TestStaticRuleIsNotExternalDNSRecordShape(t *testing.T) {
+	// external-dns's AdGuard provider claims any rule that splits into three
+	// parts on `;`. A static rule must never have that shape.
+	for _, r := range mustRecords(t, "nas=192.0.2.1,v6=2001:db8::1") {
+		if strings.Contains(r.Rule(), ";") {
+			t.Errorf("Rule() = %q contains ';', external-dns would claim it", r.Rule())
+		}
 	}
 }

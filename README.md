@@ -67,6 +67,8 @@ AdGuard answers with the **union** of every rewrite that matches a name; a speci
 
 Setting `WILDCARD_FALLBACK=false` and listing the non-cluster hosts in `STATIC_RECORDS` avoids that class entirely: every name gets exactly one answer, and names nobody declared fall through to upstream DNS. The cost is that a new non-cluster host needs one entry. In wildcard mode, static hosts are added to the `denyallow` list automatically so they never pick up the fallback address.
 
+Static records are written in AdGuard's shorthand, `|nas.<root>^$dnsrewrite=192.168.1.1,important` (A or AAAA is inferred from the address), not the full `NOERROR;A;…` form. The [external-dns AdGuard provider](https://github.com/muhlba91/external-dns-provider-adguard) claims every full-form rule as its own record: each time it writes, it moves them out of the managed block, and the next sync adds them again, so every external-dns change used to leave another copy of each static name. The provider ignores the shorthand. Any copy of a static record found outside the block, in either form, is removed as an orphan.
+
 ## Health Endpoints
 
 | Endpoint | Behaviour |

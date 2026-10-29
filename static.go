@@ -23,10 +23,34 @@ func (r StaticRecord) RRType() string {
 }
 
 // Rule renders the record as an exact-host AdGuard rewrite. The `|...^` anchors
-// match the host itself and nothing beneath it, the same form external-dns's
-// AdGuard provider writes, and `important` keeps blocklists from overriding it.
+// match the host itself and nothing beneath it, and `important` keeps
+// blocklists from overriding it.
+//
+// It uses the `$dnsrewrite=<ip>` shorthand (AdGuard infers A or AAAA from the
+// address) on purpose. external-dns's AdGuard provider claims every rule of the
+// full `NOERROR;TYPE;target` form as one of its records: on each write it lifts
+// them out of our block and appends them after it, and the next sync refills
+// the block, so every external-dns change added another copy of each name. The
+// shorthand has no `;`, which that provider treats as a rule it does not manage.
 func (r StaticRecord) Rule() string {
+	return fmt.Sprintf("|%s^$dnsrewrite=%s,important", r.Host, r.IP.String())
+}
+
+// LegacyRule is the full-form rewrite earlier versions wrote.
+func (r StaticRecord) LegacyRule() string {
 	return fmt.Sprintf("|%s^$dnsrewrite=NOERROR;%s;%s,important", r.Host, r.RRType(), r.IP.String())
+}
+
+// orphanRules is every rendering of the static records. Outside the managed
+// block such a rule can only be a copy of ours that another writer moved
+// there, so it is dropped rather than kept as a user rule.
+func orphanRules(records []StaticRecord) map[string]bool {
+	out := make(map[string]bool, 2*len(records))
+	for _, r := range records {
+		out[r.Rule()] = true
+		out[r.LegacyRule()] = true
+	}
+	return out
 }
 
 // parseStaticRecords reads STATIC_RECORDS: comma-separated `name=ip` pairs.
