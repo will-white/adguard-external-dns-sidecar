@@ -49,6 +49,7 @@ Key invariants in `applySmartRule`:
 - Everything between the sentinels is **discarded and regenerated** — never hand-edit content there.
 - Rules outside the block are preserved in order, but the managed block is always re-appended at the end, so rules that were below it move above it.
 - Only hosts ending in `.<ROOT_DOMAIN>` become `denyallow=` entries; other Ingress hosts are ignored.
+- Copies of a `STATIC_RECORDS` rule outside the block (shorthand or the old full `NOERROR;A;…` form) are always dropped as orphans. Static rules must never contain `;`: external-dns's AdGuard provider claims any `|name^…;TYPE;target` rule and moves it out of the block on every write (`TestStaticRuleIsNotExternalDNSRecordShape`).
 - Legacy-rule cleanup (bare `||*.<root>^…` wildcards and old `/regex/…$dnsrewrite` rules) runs **only until a sentinel is seen** — it migrates pre-sentinel deployments and must not strip rules once a managed block exists.
 
 The `denyallow` approach replaced an earlier regex/exception scheme (commit 64aa091); prefer standard AdGuard wildcard + modifier syntax over regex rules.

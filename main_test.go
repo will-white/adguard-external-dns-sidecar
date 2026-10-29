@@ -125,7 +125,7 @@ func TestApplySmartRule(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, changed := applySmartRule(tt.currentRules, tt.newBlock, tt.rootDomain)
+			got, changed := applySmartRule(tt.currentRules, tt.newBlock, tt.rootDomain, nil)
 			if changed != tt.wantChanged {
 				t.Errorf("applySmartRule() changed = %v, want %v", changed, tt.wantChanged)
 			}
@@ -421,7 +421,7 @@ func TestApplySmartRuleMovesBlockBelowLaterRules(t *testing.T) {
 	newBlock := []string{ManagedBlockStart, "||*.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.1", ManagedBlockEnd}
 	current := append(append([]string{"||before^"}, newBlock...), "||after^")
 
-	got, changed := applySmartRule(current, newBlock, "domain.tld")
+	got, changed := applySmartRule(current, newBlock, "domain.tld", nil)
 
 	want := []string{"||before^", "||after^", ManagedBlockStart, "||*.domain.tld^$dnsrewrite=NOERROR;A;192.0.2.1", ManagedBlockEnd}
 	if !changed {

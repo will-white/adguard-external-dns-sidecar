@@ -232,7 +232,7 @@ func syncRules(config Config, k8sClient K8sClient) error {
 
 	// Process rules
 	newRules := generateRules(hosts, config)
-	updatedRules, needsUpdate := applySmartRule(rules, newRules, config.RootDomain)
+	updatedRules, needsUpdate := applySmartRule(rules, newRules, config.RootDomain, orphanRules(config.StaticRecords))
 
 	if !needsUpdate {
 		return nil
@@ -299,8 +299,9 @@ func wildcardRule(hosts []string, rootDomain, ip string) string {
 	return rule
 }
 
-// applySmartRule update the rules list with the new managed block
-func applySmartRule(currentRules []string, newManagedBlock []string, rootDomain string) ([]string, bool) {
+// applySmartRule update the rules list with the new managed block. Rules in
+// orphans belong to the block wherever they appear, so stray copies are dropped.
+func applySmartRule(currentRules []string, newManagedBlock []string, rootDomain string, orphans map[string]bool) ([]string, bool) {
 	var preBlock []string
 	var inManagedBlock bool
 	var foundManagedBlock bool
@@ -318,8 +319,8 @@ func applySmartRule(currentRules []string, newManagedBlock []string, rootDomain 
 			continue
 		}
 
-		if inManagedBlock {
-			// We skip the old managed content
+		if inManagedBlock || orphans[r] {
+			// We skip the old managed content, and stray copies of it
 			continue
 		}
 
